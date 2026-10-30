@@ -46,6 +46,50 @@ index abbd57c..b54a64b 100644
                  )
              }
              else -> {
+diff --git a/app/src/main/java/org/tfv/deskflow/services/ConnectionService.kt b/app/src/main/java/org/tfv/deskflow/services/ConnectionService.kt
+index a4cce9b..c26dcfc 100644
+--- a/app/src/main/java/org/tfv/deskflow/services/ConnectionService.kt
++++ b/app/src/main/java/org/tfv/deskflow/services/ConnectionService.kt
+@@ -107,7 +107,7 @@ class ConnectionService : Service() {
+ 
+       override fun setClipboardData(bundle: Bundle): Result {
+         return catch({
+-          val clipboardData = bundle.getSerializable("clipboardData",ClipboardData::class.java)
++          val clipboardData = androidx.core.os.BundleCompat.getSerializable(bundle, "clipboardData", ClipboardData::class.java)
+           require(clipboardData != null) {
+             "clipboardData was not valid in clipboard data bundle"
+           }
+diff --git a/app/src/main/java/org/tfv/deskflow/services/ConnectionServiceClient.kt b/app/src/main/java/org/tfv/deskflow/services/ConnectionServiceClient.kt
+index bc94742..62e7731 100644
+--- a/app/src/main/java/org/tfv/deskflow/services/ConnectionServiceClient.kt
++++ b/app/src/main/java/org/tfv/deskflow/services/ConnectionServiceClient.kt
+@@ -139,22 +139,22 @@ class ConnectionServiceClient(
+         }
+         val message = when (clazzName) {
+           LogRecordEvent::class.java.name -> {
+-            val logRecord = bundle.getSerializable("message", LogRecordEvent::class.java)!!
++            val logRecord = androidx.core.os.BundleCompat.getSerializable(bundle, "message", LogRecordEvent::class.java)!!
+             addLogRecord(logRecord)
+ 
+             return
+           }
+ 
+           ScreenEvent.SetClipboard::class.java.name -> {
+-            bundle.getSerializable("message", ScreenEvent.SetClipboard::class.java)
++            androidx.core.os.BundleCompat.getSerializable(bundle, "message", ScreenEvent.SetClipboard::class.java)
+           }
+ 
+           KeyboardEvent::class.java.name -> {
+-            bundle.getSerializable("message", KeyboardEvent::class.java)
++            androidx.core.os.BundleCompat.getSerializable(bundle, "message", KeyboardEvent::class.java)
+           }
+ 
+           MouseEvent::class.java.name -> {
+-            bundle.getSerializable("message", MouseEvent::class.java)
++            androidx.core.os.BundleCompat.getSerializable(bundle, "message", MouseEvent::class.java)
+           }
+ 
+           else -> {
 diff --git a/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt b/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt
 index 3eeae39..6dae6f1 100644
 --- a/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt
