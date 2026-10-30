@@ -91,10 +91,20 @@ index bc94742..62e7731 100644
  
            else -> {
 diff --git a/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt b/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt
-index 3eeae39..948f360 100644
+index 3eeae39..d28cef0 100644
 --- a/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt
 +++ b/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt
-@@ -205,10 +205,11 @@ class GlobalInputService : AccessibilityService() {
+@@ -176,6 +176,9 @@ class GlobalInputService : AccessibilityService() {
+    */
+   @Volatile private var mousePointerVisible = false
+ 
++  /** Android 12 compatible full-screen pointer overlay. */
++  private val pointerOverlay by lazy { PointerOverlay(this) }
++
+   private val keyboardWasOpen = AtomicBoolean(false)
+ 
+   /** WindowManager instance for managing the mouse pointer view. */
+@@ -205,10 +208,11 @@ class GlobalInputService : AccessibilityService() {
      customizer: (NotificationCompat.Builder.() -> Unit)? = null,
    ) {
      if (
@@ -110,60 +120,252 @@ index 3eeae39..948f360 100644
      ) {
        log.warn {
          "POST_NOTIFICATIONS permission not granted, cannot send notification."
-@@ -483,16 +484,31 @@ class GlobalInputService : AccessibilityService() {
+@@ -431,7 +435,7 @@ class GlobalInputService : AccessibilityService() {
+   override fun onDestroy() {
+     serviceScope.cancel()
+     serviceClient.unbind()
+-    windowManager.removeView(mousePointerView)
++    pointerOverlay.detach()
+     super.onDestroy()
+   }
+ 
+@@ -483,18 +487,13 @@ class GlobalInputService : AccessibilityService() {
     * > Example: Used for mouse movement in the global input service.
     */
    private fun moveMousePointer(x: Int, y: Int) {
 -    if (!mousePointerVisible) return
-+    // Make sure the pointer view is always on screen (re-attach if it was lost)
-+    if (!mousePointerVisible || !mousePointerView.isAttachedToWindow) {
-+      mousePointerVisible = false
-+      setupMousePointer()
-+      if (!mousePointerVisible) return
-+    }
- 
-     val screenSize = getScreenSize()
-+    val maxX = (screenSize.px.width - 1).coerceAtLeast(0)
-+    val maxY = (screenSize.px.height - 1).coerceAtLeast(0)
-+    val clampedX = x.coerceIn(0, maxX)
-+    val clampedY = y.coerceIn(0, maxY)
-     log.debug {
+-
+-    val screenSize = getScreenSize()
+-    log.debug {
 -      "Cursor move to [${x}, ${y}] with size(${screenSize.px.width},${screenSize.px.height})"
-+      "Cursor move to [${x}, ${y}] -> [${clampedX}, ${clampedY}] with size(${screenSize.px.width},${screenSize.px.height})"
-+    }
-+    mousePointerLayout.x = clampedX
-+    mousePointerLayout.y = clampedY
-+
-+    try {
-+      windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
-+    } catch (err: Exception) {
-+      log.warn(err) { "Pointer view detached, re-attaching" }
-+      mousePointerVisible = false
-+      setupMousePointer()
-     }
+-    }
 -    mousePointerLayout.x = x
 -    mousePointerLayout.y = y
 -
 -    windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
++    pointerOverlay.moveTo(x, y)
++    // keep the old position holder in sync (used by click / swipe gestures)
++    mousePointerLayout.x = pointerOverlay.x
++    mousePointerLayout.y = pointerOverlay.y
    }
  
++
    /**
-@@ -535,8 +551,13 @@ class GlobalInputService : AccessibilityService() {
-     when (canDrawOverlays()) {
-       true -> {
-         if (!mousePointerVisible) {
+    * Move the cursor to the specified coordinates. This is used to move the
+    * mouse pointer to a specific location on the screen.
+@@ -532,20 +531,10 @@ class GlobalInputService : AccessibilityService() {
+ 
+   /** Set up the pointer view and add it to the window manager. */
+   private fun setupMousePointer() {
+-    when (canDrawOverlays()) {
+-      true -> {
+-        if (!mousePointerVisible) {
 -          windowManager.addView(mousePointerView, mousePointerLayout)
 -          mousePointerVisible = true
-+          try {
-+            if (!mousePointerView.isAttachedToWindow)
-+              windowManager.addView(mousePointerView, mousePointerLayout)
-+            mousePointerVisible = true
-+          } catch (err: Exception) {
-+            log.error(err) { "Unable to add pointer view: ${err.message}" }
-+          }
-         }
-       }
+-        }
+-      }
+-
+-      false -> {
+-        log.warn { "Overlay permissions not granted yet" }
+-      }
+-    }
++    pointerOverlay.ensureAttached()
+   }
  
++
+   /**
+    * Called when the service is started. This is where we set the service to be
+    * sticky and return START_STICKY.
+diff --git a/app/src/main/java/org/tfv/deskflow/services/PointerOverlay.kt b/app/src/main/java/org/tfv/deskflow/services/PointerOverlay.kt
+new file mode 100644
+index 0000000..479e032
+--- /dev/null
++++ b/app/src/main/java/org/tfv/deskflow/services/PointerOverlay.kt
+@@ -0,0 +1,184 @@
++package org.tfv.deskflow.services
++
++import android.content.Context
++import android.graphics.Color
++import android.graphics.PixelFormat
++import android.os.Build
++import android.provider.Settings
++import android.util.TypedValue
++import android.view.Gravity
++import android.view.View
++import android.view.WindowManager
++import android.widget.FrameLayout
++import android.widget.ImageView
++import android.widget.TextView
++import org.tfv.deskflow.R
++import org.tfv.deskflow.client.util.logging.KLoggingManager
++
++/**
++ * Android 12 compatible mouse pointer.
++ *
++ * Instead of moving a small window around the screen (which can get lost
++ * off-screen or detached), this adds ONE full-screen, transparent,
++ * non-touchable overlay and only moves the pointer image inside it.
++ *
++ * - The pointer is clamped to the real display bounds, so it never leaves.
++ * - If the accessibility overlay cannot be added, it falls back to a regular
++ *   "display over other apps" overlay.
++ * - A small debug label shows how many mouse events arrived and the last
++ *   position, so it is visible on the phone whether events are reaching it.
++ */
++class PointerOverlay(private val context: Context) {
++
++  private val windowManager =
++    context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
++
++  private var root: FrameLayout? = null
++  private var pointer: ImageView? = null
++  private var debugLabel: TextView? = null
++
++  private var posX = 200f
++  private var posY = 200f
++  private var eventCount = 0L
++
++  var showDebugLabel = true
++
++  /** Make sure the overlay is attached. Safe to call any number of times. */
++  fun ensureAttached(): Boolean {
++    val current = root
++    if (current != null && current.isAttachedToWindow) return true
++
++    val newRoot = FrameLayout(context)
++    val newPointer =
++      ImageView(context).apply {
++        setImageResource(R.drawable.mouse_pointer)
++        layoutParams =
++          FrameLayout.LayoutParams(
++            FrameLayout.LayoutParams.WRAP_CONTENT,
++            FrameLayout.LayoutParams.WRAP_CONTENT,
++          )
++      }
++    val newLabel =
++      TextView(context).apply {
++        setTextColor(Color.WHITE)
++        setBackgroundColor(0x99000000.toInt())
++        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
++        setPadding(8, 4, 8, 4)
++        text = "Deskflow: czekam na mysz"
++        visibility = if (showDebugLabel) View.VISIBLE else View.GONE
++        layoutParams =
++          FrameLayout.LayoutParams(
++              FrameLayout.LayoutParams.WRAP_CONTENT,
++              FrameLayout.LayoutParams.WRAP_CONTENT,
++            )
++            .apply { gravity = Gravity.BOTTOM or Gravity.START }
++      }
++    newRoot.addView(newPointer)
++    newRoot.addView(newLabel)
++
++    val types = buildList {
++      add(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
++      if (Settings.canDrawOverlays(context))
++        add(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
++    }
++
++    for (type in types) {
++      val params =
++        WindowManager.LayoutParams(
++            WindowManager.LayoutParams.MATCH_PARENT,
++            WindowManager.LayoutParams.MATCH_PARENT,
++            type,
++            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
++              WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
++              WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
++              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
++            PixelFormat.TRANSLUCENT,
++          )
++          .apply {
++            gravity = Gravity.TOP or Gravity.START
++            if (Build.VERSION.SDK_INT >= 28)
++              layoutInDisplayCutoutMode =
++                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
++          }
++      try {
++        windowManager.addView(newRoot, params)
++        root = newRoot
++        pointer = newPointer
++        debugLabel = newLabel
++        applyPosition()
++        log.info { "Pointer overlay attached (type=$type)" }
++        return true
++      } catch (err: Exception) {
++        log.warn(err) { "Pointer overlay type=$type failed: ${err.message}" }
++      }
++    }
++    log.error { "Unable to attach pointer overlay" }
++    return false
++  }
++
++  /** Absolute move (also used when the cursor enters this screen). */
++  fun moveTo(x: Int, y: Int) {
++    posX = x.toFloat()
++    posY = y.toFloat()
++    update("abs")
++  }
++
++  /** Relative move. */
++  fun moveBy(dx: Int, dy: Int) {
++    posX += dx
++    posY += dy
++    update("rel")
++  }
++
++  val x: Int
++    get() = posX.toInt()
++
++  val y: Int
++    get() = posY.toInt()
++
++  private fun update(kind: String) {
++    eventCount++
++    if (!ensureAttached()) return
++    applyPosition()
++    debugLabel?.let {
++      it.visibility = if (showDebugLabel) View.VISIBLE else View.GONE
++      it.text = "Deskflow: mysz #$eventCount $kind (${x}, ${y})"
++    }
++  }
++
++  private fun applyPosition() {
++    val (w, h) = displaySize()
++    posX = posX.coerceIn(0f, (w - 1).coerceAtLeast(0).toFloat())
++    posY = posY.coerceIn(0f, (h - 1).coerceAtLeast(0).toFloat())
++    pointer?.apply {
++      translationX = posX
++      translationY = posY
++      visibility = View.VISIBLE
++      bringToFront()
++    }
++  }
++
++  private fun displaySize(): Pair<Int, Int> {
++    return try {
++      val bounds = windowManager.currentWindowMetrics.bounds
++      bounds.width() to bounds.height()
++    } catch (err: Throwable) {
++      val dm = context.resources.displayMetrics
++      dm.widthPixels to dm.heightPixels
++    }
++  }
++
++  fun detach() {
++    val current = root ?: return
++    try {
++      if (current.isAttachedToWindow) windowManager.removeView(current)
++    } catch (err: Exception) {
++      log.warn(err) { "detach failed: ${err.message}" }
++    }
++    root = null
++  }
++
++  companion object {
++    private val log = KLoggingManager.logger(PointerOverlay::class.java.simpleName)
++  }
++}
 diff --git a/app/src/main/java/org/tfv/deskflow/ui/screens/RootScreen.kt b/app/src/main/java/org/tfv/deskflow/ui/screens/RootScreen.kt
 index 177a334..c5515bf 100644
 --- a/app/src/main/java/org/tfv/deskflow/ui/screens/RootScreen.kt
