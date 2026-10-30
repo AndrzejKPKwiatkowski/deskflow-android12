@@ -91,7 +91,7 @@ index bc94742..62e7731 100644
  
            else -> {
 diff --git a/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt b/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt
-index 3eeae39..6dae6f1 100644
+index 3eeae39..948f360 100644
 --- a/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt
 +++ b/app/src/main/java/org/tfv/deskflow/services/GlobalInputService.kt
 @@ -205,10 +205,11 @@ class GlobalInputService : AccessibilityService() {
@@ -110,6 +110,60 @@ index 3eeae39..6dae6f1 100644
      ) {
        log.warn {
          "POST_NOTIFICATIONS permission not granted, cannot send notification."
+@@ -483,16 +484,31 @@ class GlobalInputService : AccessibilityService() {
+    * > Example: Used for mouse movement in the global input service.
+    */
+   private fun moveMousePointer(x: Int, y: Int) {
+-    if (!mousePointerVisible) return
++    // Make sure the pointer view is always on screen (re-attach if it was lost)
++    if (!mousePointerVisible || !mousePointerView.isAttachedToWindow) {
++      mousePointerVisible = false
++      setupMousePointer()
++      if (!mousePointerVisible) return
++    }
+ 
+     val screenSize = getScreenSize()
++    val maxX = (screenSize.px.width - 1).coerceAtLeast(0)
++    val maxY = (screenSize.px.height - 1).coerceAtLeast(0)
++    val clampedX = x.coerceIn(0, maxX)
++    val clampedY = y.coerceIn(0, maxY)
+     log.debug {
+-      "Cursor move to [${x}, ${y}] with size(${screenSize.px.width},${screenSize.px.height})"
++      "Cursor move to [${x}, ${y}] -> [${clampedX}, ${clampedY}] with size(${screenSize.px.width},${screenSize.px.height})"
++    }
++    mousePointerLayout.x = clampedX
++    mousePointerLayout.y = clampedY
++
++    try {
++      windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
++    } catch (err: Exception) {
++      log.warn(err) { "Pointer view detached, re-attaching" }
++      mousePointerVisible = false
++      setupMousePointer()
+     }
+-    mousePointerLayout.x = x
+-    mousePointerLayout.y = y
+-
+-    windowManager.updateViewLayout(mousePointerView, mousePointerLayout)
+   }
+ 
+   /**
+@@ -535,8 +551,13 @@ class GlobalInputService : AccessibilityService() {
+     when (canDrawOverlays()) {
+       true -> {
+         if (!mousePointerVisible) {
+-          windowManager.addView(mousePointerView, mousePointerLayout)
+-          mousePointerVisible = true
++          try {
++            if (!mousePointerView.isAttachedToWindow)
++              windowManager.addView(mousePointerView, mousePointerLayout)
++            mousePointerVisible = true
++          } catch (err: Exception) {
++            log.error(err) { "Unable to add pointer view: ${err.message}" }
++          }
+         }
+       }
+ 
 diff --git a/app/src/main/java/org/tfv/deskflow/ui/screens/RootScreen.kt b/app/src/main/java/org/tfv/deskflow/ui/screens/RootScreen.kt
 index 177a334..c5515bf 100644
 --- a/app/src/main/java/org/tfv/deskflow/ui/screens/RootScreen.kt
@@ -138,6 +192,19 @@ index 177a334..c5515bf 100644
              PermissionsNeededDialog(
                text = R.string.permission_dialog_nearby_devices_message,
                onClick = {
+diff --git a/client/src/main/java/org/tfv/deskflow/client/manager/MessageHandler.kt b/client/src/main/java/org/tfv/deskflow/client/manager/MessageHandler.kt
+index 1fa3252..30d4699 100644
+--- a/client/src/main/java/org/tfv/deskflow/client/manager/MessageHandler.kt
++++ b/client/src/main/java/org/tfv/deskflow/client/manager/MessageHandler.kt
+@@ -152,6 +152,8 @@ class MessageHandler(
+         isScreenActive = true
+         ClipboardSendManager.clearPendingClipboardDataMessages()
+         ClientEventBus.emit(ScreenEvent.Enter)
++        // Android 12 fix: place the pointer where the cursor entered this screen
++        ClientEventBus.emit(MouseEvent.move(message.x.toInt(), message.y.toInt()))
+       }
+ 
+       is LeaveMessage -> {
 diff --git a/iconics-typeface-library/build.gradle.kts b/iconics-typeface-library/build.gradle.kts
 index b3dd76b..5e1a705 100644
 --- a/iconics-typeface-library/build.gradle.kts
