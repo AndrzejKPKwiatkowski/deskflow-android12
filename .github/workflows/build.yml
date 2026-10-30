@@ -38,3 +38,26 @@ jobs:
         with:
           name: deskflow-android12-apk
           path: src/app/build/outputs/apk/debug/*.apk
+
+      - name: Sprawdź zgodność z Androidem 12 (lint)
+        working-directory: src
+        continue-on-error: true
+        run: ./gradlew :app:lintDebug -Dlint.baselines.continue=true
+
+      - name: Pokaż wywołania niedostępne na Androidzie 12
+        if: always()
+        working-directory: src
+        run: |
+          f=$(ls app/build/reports/lint-results-debug.xml 2>/dev/null || true)
+          if [ -n "$f" ]; then
+            grep -B1 -A6 'id="NewApi"' "$f" | grep -E 'message=|file=' || echo "Brak problemów NewApi"
+          else
+            echo "Brak raportu lint"
+          fi
+
+      - name: Udostępnij raport zgodności
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raport-lint
+          path: src/app/build/reports/lint-results-debug.*
